@@ -1,6 +1,6 @@
-import { fetchBinanceTickers, fetchBinanceCandles } from "./exchanges/binance";
+import { fetchBinanceTickers, fetchBinanceCandles, fetchBinanceOI } from "./exchanges/binance";
 import { fetchBybitTickers } from "./exchanges/bybit";
-import { fetchMarketCaps } from "./exchanges/coingecko";
+import { fetchMarketCaps, lookupMarketCap } from "./exchanges/coingecko";
 import { computeSRLevels, findNearbyLevels } from "./sr-engine";
 import {
   getCoinglassHeatmapUrl,
@@ -33,7 +33,6 @@ function dedupeByBaseSymbol(tickers: RawTicker[]): RawTicker[] {
     if (!existing) {
       seen.set(t.base_symbol, t);
     } else {
-      // Keep highest volume ticker but merge in funding/OI from other sources
       if (t.volume_24h_usd > existing.volume_24h_usd) {
         seen.set(t.base_symbol, {
           ...t,
@@ -50,6 +49,12 @@ function dedupeByBaseSymbol(tickers: RawTicker[]): RawTicker[] {
     }
   }
   return Array.from(seen.values());
+}
+
+function getBinanceSymbol(ticker: RawTicker): string {
+  return ticker.symbol.includes("USDT")
+    ? ticker.symbol
+    : `${ticker.base_symbol}USDT`;
 }
 
 async function computeChangePct(
@@ -71,10 +76,7 @@ async function computeChangePct(
 
 async function computeSRForTicker(ticker: RawTicker) {
   try {
-    const binanceSymbol = ticker.symbol.includes("USDT")
-      ? ticker.symbol
-      : `${ticker.base_symbol}USDT`;
-    const candles = await fetchBinanceCandles(binanceSymbol, "1d", 100);
+    const candles = await fetchBinanceCandles(getBinanceSymbol(ticker), "1d", 100);
     const levels = computeSRLevels(candles, "1d");
     return findNearbyLevels(ticker.price, levels, SR_THRESHOLD_PCT);
   } catch {
@@ -82,35 +84,9 @@ async function computeSRForTicker(ticker: RawTicker) {
   }
 }
 
-function toTickerData(
-  raw: RawTicker,
-  changePct: number,
-  marketCaps: Map<string, number>
-): TickerData {
-  return {
-    symbol: raw.symbol,
-    base_symbol: raw.base_symbol,
-    exchange: raw.exchange,
-    price: raw.price,
-    change_pct: changePct,
-    volume_24h_usd: raw.volume_24h_usd,
-    market_cap: marketCaps.get(raw.base_symbol),
-    open_interest: raw.open_interest,
-    funding_rate: raw.funding_rate,
-    near_sr: [],
-    links: {
-      coinglass_heatmap: getCoinglassHeatmapUrl(raw.base_symbol),
-      coinglass_funding: getCoinglassFundingUrl(raw.base_symbol),
-      coinglass_oi: getCoinglassOIUrl(raw.base_symbol),
-      tradingview: getTradingViewUrl(raw.symbol, raw.exchange),
-    },
-  };
-}
-
 export async function getAggregatedTickers(
   tf: Timeframe = "1d"
 ): Promise<TickerResponse> {
-  // Fetch tickers + market caps in parallel
   const [tickerResults, marketCaps] = await Promise.all([
     Promise.allSettled([fetchBinanceTickers(), fetchBybitTickers()]),
     fetchMarketCaps(),
@@ -123,20 +99,7 @@ export async function getAggregatedTickers(
 
   const deduped = dedupeByBaseSymbol(allTickers);
 
-  if (tf === "1d") {
-    const sorted = [...deduped].sort(
-      (a, b) => b.price_change_24h - a.price_change_24h
-    );
-
-    const gainersRaw = sorted.slice(0, TOP_N);
-    const losersRaw = sorted.slice(-TOP_N).reverse();
-
-    return await enrichWithSR(gainersRaw, losersRaw, tf, (raw) =>
-      toTickerData(raw, raw.price_change_24h, marketCaps)
-    );
-  }
-
-  // For other timeframes: compute change % from candles
+  // Pre-sort by 24h to pick candidates for candle-based re-ranking
   const sortedBy24h = [...deduped].sort(
     (a, b) => b.price_change_24h - a.price_change_24h
   );
@@ -146,83 +109,85 @@ export async function getAggregatedTickers(
     ...sortedBy24h.slice(0, candidateCount),
     ...sortedBy24h.slice(-candidateCount),
   ];
-
   const candidateMap = new Map<string, RawTicker>();
   for (const c of candidates) candidateMap.set(c.symbol, c);
   const uniqueCandidates = Array.from(candidateMap.values());
 
+  // Compute TF-specific change from candles for ALL timeframes (including 1d)
+  // This ensures 1d matches daily candle open (like TradingView) instead of rolling 24h
   const changeResults = await Promise.allSettled(
-    uniqueCandidates.map((t) => {
-      const binanceSymbol = t.symbol.includes("USDT")
-        ? t.symbol
-        : `${t.base_symbol}USDT`;
-      return computeChangePct(binanceSymbol, t.price, tf);
-    })
+    uniqueCandidates.map((t) =>
+      computeChangePct(getBinanceSymbol(t), t.price, tf)
+    )
   );
 
   const withChange = uniqueCandidates
     .map((t, i) => {
       const r = changeResults[i]!;
-      const pct = r.status === "fulfilled" ? r.value : null;
-      return { raw: t, change_pct: pct ?? t.price_change_24h };
+      const pct = r.status === "fulfilled" && r.value !== null ? r.value : t.price_change_24h;
+      return { raw: t, change_pct: pct };
     })
     .sort((a, b) => b.change_pct - a.change_pct);
 
   const gainersRaw = withChange.slice(0, TOP_N);
   const losersRaw = withChange.slice(-TOP_N).reverse();
 
-  return await enrichWithSR(
-    gainersRaw.map((g) => g.raw),
-    losersRaw.map((l) => l.raw),
-    tf,
-    (raw) => {
-      const entry = withChange.find((w) => w.raw.symbol === raw.symbol);
-      return toTickerData(
-        raw,
-        entry?.change_pct ?? raw.price_change_24h,
-        marketCaps
-      );
+  const allTopMovers = [...gainersRaw, ...losersRaw];
+
+  // Fetch OI for top movers that don't have it (from Binance, per-symbol)
+  const oiResults = await Promise.allSettled(
+    allTopMovers.map((entry) => {
+      if (entry.raw.open_interest) return Promise.resolve(null);
+      return fetchBinanceOI(getBinanceSymbol(entry.raw));
+    })
+  );
+
+  const oiMap = new Map<string, number>();
+  allTopMovers.forEach((entry, i) => {
+    const r = oiResults[i]!;
+    if (r.status === "fulfilled" && r.value != null) {
+      // Convert from coin quantity to USD
+      oiMap.set(entry.raw.symbol, r.value * entry.raw.price);
     }
-  );
-}
+  });
 
-async function enrichWithSR(
-  gainersRaw: RawTicker[],
-  losersRaw: RawTicker[],
-  tf: Timeframe,
-  convert: (raw: RawTicker) => TickerData
-): Promise<TickerResponse> {
-  const topMovers = [...gainersRaw, ...losersRaw];
-
+  // Compute S/R levels
   const srResults = await Promise.allSettled(
-    topMovers.map((t) => computeSRForTicker(t))
+    allTopMovers.map((entry) => computeSRForTicker(entry.raw))
   );
-
-  const srMap = new Map<
-    string,
-    Awaited<ReturnType<typeof computeSRForTicker>>
-  >();
-  topMovers.forEach((t, i) => {
+  const srMap = new Map<string, Awaited<ReturnType<typeof computeSRForTicker>>>();
+  allTopMovers.forEach((entry, i) => {
     const r = srResults[i]!;
-    if (r.status === "fulfilled") srMap.set(t.symbol, r.value);
+    if (r.status === "fulfilled") srMap.set(entry.raw.symbol, r.value);
   });
 
-  const gainers = gainersRaw.map((raw) => {
-    const td = convert(raw);
-    td.near_sr = srMap.get(raw.symbol) ?? [];
-    return td;
-  });
-
-  const losers = losersRaw.map((raw) => {
-    const td = convert(raw);
-    td.near_sr = srMap.get(raw.symbol) ?? [];
-    return td;
-  });
+  function convert(entry: { raw: RawTicker; change_pct: number }): TickerData {
+    const raw = entry.raw;
+    const oi = raw.open_interest ?? oiMap.get(raw.symbol);
+    return {
+      symbol: raw.symbol,
+      base_symbol: raw.base_symbol,
+      exchange: raw.exchange,
+      price: raw.price,
+      change_pct: entry.change_pct,
+      volume_24h_usd: raw.volume_24h_usd,
+      market_cap: lookupMarketCap(raw.base_symbol, marketCaps),
+      open_interest: oi,
+      funding_rate: raw.funding_rate,
+      near_sr: srMap.get(raw.symbol) ?? [],
+      links: {
+        coinglass_heatmap: getCoinglassHeatmapUrl(raw.base_symbol),
+        coinglass_funding: getCoinglassFundingUrl(raw.base_symbol),
+        coinglass_oi: getCoinglassOIUrl(raw.base_symbol),
+        tradingview: getTradingViewUrl(raw.symbol, raw.exchange),
+      },
+    };
+  }
 
   return {
     timeframe: tf,
     updated_at: new Date().toISOString(),
-    gainers,
-    losers,
+    gainers: gainersRaw.map(convert),
+    losers: losersRaw.map(convert),
   };
 }

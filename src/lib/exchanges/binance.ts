@@ -13,9 +13,14 @@ interface BinanceExchangeInfo {
   symbols: BinanceSymbolInfo[];
 }
 
+interface BinancePremiumIndex {
+  symbol: string;
+  lastFundingRate: string;
+}
+
 let activeSymbols: Set<string> | null = null;
 let activeSymbolsTimestamp = 0;
-const SYMBOLS_CACHE_TTL = 5 * 60 * 1000; // 5 minutes
+const SYMBOLS_CACHE_TTL = 5 * 60 * 1000;
 
 async function getActivePerpetualsSet(): Promise<Set<string>> {
   const now = Date.now();
@@ -52,9 +57,10 @@ interface BinanceTicker {
 }
 
 export async function fetchBinanceTickers(): Promise<RawTicker[]> {
-  const [tickerRes, activePerpetuals] = await Promise.all([
+  const [tickerRes, activePerpetuals, fundingMap] = await Promise.all([
     fetch(`${BASE_URL}/fapi/v1/ticker/24hr`, { next: { revalidate: 15 } }),
     getActivePerpetualsSet(),
+    fetchBinanceFundingRates(),
   ]);
 
   if (!tickerRes.ok) throw new Error(`Binance tickers failed: ${tickerRes.status}`);
@@ -70,7 +76,40 @@ export async function fetchBinanceTickers(): Promise<RawTicker[]> {
       price: parseFloat(t.lastPrice),
       price_change_24h: parseFloat(t.priceChangePercent),
       volume_24h_usd: parseFloat(t.quoteVolume),
+      funding_rate: fundingMap.get(t.symbol),
     }));
+}
+
+async function fetchBinanceFundingRates(): Promise<Map<string, number>> {
+  const map = new Map<string, number>();
+  try {
+    const res = await fetch(`${BASE_URL}/fapi/v1/premiumIndex`, {
+      next: { revalidate: 60 },
+    });
+    if (!res.ok) return map;
+    const data: BinancePremiumIndex[] = await res.json();
+    for (const item of data) {
+      const rate = parseFloat(item.lastFundingRate);
+      if (!isNaN(rate)) map.set(item.symbol, rate);
+    }
+  } catch {
+    // non-critical
+  }
+  return map;
+}
+
+export async function fetchBinanceOI(symbol: string): Promise<number | null> {
+  try {
+    const res = await fetch(
+      `${BASE_URL}/fapi/v1/openInterest?symbol=${symbol}`,
+      { next: { revalidate: 60 } }
+    );
+    if (!res.ok) return null;
+    const data: { openInterest: string } = await res.json();
+    return parseFloat(data.openInterest);
+  } catch {
+    return null;
+  }
 }
 
 interface BinanceKline {
