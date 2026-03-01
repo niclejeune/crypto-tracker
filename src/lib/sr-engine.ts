@@ -70,16 +70,23 @@ export function findNearbyLevels(
   thresholdPct: number = 1.5
 ): ProximityResult[] {
   return levels
-    .map((level) => ({
-      timeframe: level.timeframe,
-      type: level.type,
-      level: level.price,
-      distance_pct:
-        Math.round(
-          (Math.abs(currentPrice - level.price) / level.price) * 10000
-        ) / 100,
-      strength: level.strength,
-    }))
+    .map((level) => {
+      // Polarity flip: if price is below the level, it acts as resistance
+      // regardless of how it was originally detected. If price is above, it's support.
+      const effectiveType: "support" | "resistance" =
+        currentPrice < level.price ? "resistance" : "support";
+
+      return {
+        timeframe: level.timeframe,
+        type: effectiveType,
+        level: level.price,
+        distance_pct:
+          Math.round(
+            (Math.abs(currentPrice - level.price) / level.price) * 10000
+          ) / 100,
+        strength: level.strength,
+      };
+    })
     .filter((r) => r.distance_pct <= thresholdPct)
     .sort((a, b) => a.distance_pct - b.distance_pct);
 }

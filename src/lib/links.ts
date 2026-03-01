@@ -6,15 +6,15 @@ const EXCHANGE_TV_MAP: Record<string, string> = {
 };
 
 export function getCoinglassHeatmapUrl(baseSymbol: string): string {
-  return `https://www.coinglass.com/liquidation-heatmap/${baseSymbol}`;
+  return `https://www.coinglass.com/pro/futures/LiquidationHeatMap?coin=${baseSymbol}`;
 }
 
 export function getCoinglassFundingUrl(baseSymbol: string): string {
-  return `https://www.coinglass.com/funding/${baseSymbol}`;
+  return `https://www.coinglass.com/FundingRate/${baseSymbol}`;
 }
 
 export function getCoinglassOIUrl(baseSymbol: string): string {
-  return `https://www.coinglass.com/open-interest/${baseSymbol}`;
+  return `https://www.coinglass.com/currencies/${baseSymbol}`;
 }
 
 export function getTradingViewUrl(
