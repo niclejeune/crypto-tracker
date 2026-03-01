@@ -13,9 +13,7 @@ Real-time dashboard aggregating **top gainers and losers** across perpetual futu
 ## Tech Stack
 
 - **Frontend:** Next.js 14+ (App Router), TailwindCSS, TanStack Query
-- **Database:** Supabase (PostgreSQL)
-- **Cache:** Upstash Redis (optional)
-- **Background Jobs:** Vercel Cron + Edge Functions
+- **Data:** Stateless — live exchange API fetches cached via Next.js ISR (no database)
 - **Deployment:** Vercel
 
 ## Getting Started
@@ -30,11 +28,9 @@ npm run dev
 
 | Variable | Required | Description |
 |---|---|---|
-| `NEXT_PUBLIC_SUPABASE_URL` | Yes | Supabase project URL |
-| `NEXT_PUBLIC_SUPABASE_ANON_KEY` | Yes | Supabase anon key |
-| `SUPABASE_SERVICE_ROLE_KEY` | Yes | Supabase service role key |
-| `UPSTASH_REDIS_REST_URL` | No | Upstash Redis URL |
-| `UPSTASH_REDIS_REST_TOKEN` | No | Upstash Redis token |
+| `ACTIVE_EXCHANGES` | No | Comma-separated exchanges (default: `binance,bybit`) |
+| `TOP_N_RESULTS` | No | Max results per side (default: `20`) |
+| `SR_PROXIMITY_THRESHOLD_PCT` | No | S/R proximity threshold % (default: `1.5`) |
 
 ## License
 

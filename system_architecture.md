@@ -32,7 +32,7 @@ The tool is designed for active futures traders who want a single view of what's
 │   │ Selector   │  │ Losers Table │  │ (client-side rendering) │  │
 │   └────────────┘  └──────────────┘  └─────────────────────────┘  │
 │                          │                                       │
-│              Polls every 15-60s via SWR/React Query              │
+│              Polls every 15-60s via TanStack Query               │
 └──────────────────────────┬───────────────────────────────────────┘
                            │ HTTPS (JSON)
                            ▼
@@ -43,43 +43,15 @@ The tool is designed for active futures traders who want a single view of what's
 │   /api/sr-levels?symbol=BTC   → Support/resistance levels        │
 │   /api/metadata               → Exchange status, symbols list    │
 │                                                                  │
-│   Reads from cache (Supabase/Redis), never hits exchanges live   │
+│   Fetches exchange data live, cached via Next.js revalidate      │
+│   (15-30s TTL). S/R computed on the fly from candle data.        │
 └──────────────────────────┬───────────────────────────────────────┘
                            │
                            ▼
 ┌──────────────────────────────────────────────────────────────────┐
-│                     CACHE / DATABASE LAYER                       │
+│                   Exchange APIs (Public, No Auth)                 │
 │                                                                  │
-│   Supabase (PostgreSQL)                                          │
-│   ┌──────────────────┐  ┌──────────────────┐  ┌──────────────┐  │
-│   │ ticker_snapshots │  │ sr_levels        │  │ candles_cache │  │
-│   │ (per TF, per     │  │ (per symbol,     │  │ (raw klines   │  │
-│   │  exchange)       │  │  per HTF)        │  │  for S/R calc)│  │
-│   └──────────────────┘  └──────────────────┘  └──────────────┘  │
-└──────────────────────────┬───────────────────────────────────────┘
-                           │
-                           ▼
-┌──────────────────────────────────────────────────────────────────┐
-│                   BACKGROUND WORKERS (Cron Jobs)                 │
-│                                                                  │
-│   ┌─────────────────────────┐  ┌──────────────────────────────┐  │
-│   │ Ticker Aggregator       │  │ S/R Calculator               │  │
-│   │ (runs every 15-30s)     │  │ (runs every 5-15 min)        │  │
-│   │                         │  │                              │  │
-│   │ • Fetches 24hr tickers  │  │ • Fetches 4H/1D/1W klines   │  │
-│   │   from all exchanges    │  │ • Detects swing highs/lows   │  │
-│   │ • Computes % change per │  │ • Clusters nearby levels     │  │
-│   │   timeframe             │  │ • Writes to sr_levels table  │  │
-│   │ • Ranks top N gainers / │  │                              │  │
-│   │   losers                │  │                              │  │
-│   │ • Writes to cache       │  │                              │  │
-│   └────────┬────────────────┘  └─────────┬────────────────────┘  │
-│            │                             │                       │
-│            ▼                             ▼                       │
-│   ┌─────────────────────────────────────────────────────────┐    │
-│   │              Exchange APIs (Public, No Auth)             │    │
-│   │   Binance Futures  │  Bybit  │  OKX  │  Bitget          │    │
-│   └─────────────────────────────────────────────────────────┘    │
+│   Binance Futures  │  Bybit  │  OKX (V2)  │  Bitget (V2)        │
 └──────────────────────────────────────────────────────────────────┘
 ```
 
@@ -156,85 +128,46 @@ Coinglass Open Interest:
 
 ---
 
-## 4. Database Schema (Supabase / PostgreSQL)
+## 4. Data Model (In-Memory / Stateless)
 
-### 4.1 `symbols`
-Master list of tracked perpetual contracts.
+No external database. All data is fetched live from exchange APIs and cached via Next.js `revalidate` (ISR data cache, 15-30s TTL). S/R levels are computed on the fly from candle data.
 
-```sql
-CREATE TABLE symbols (
-  id            SERIAL PRIMARY KEY,
-  base_symbol   TEXT NOT NULL,            -- 'BTC', 'ETH', 'SOL'
-  symbol        TEXT NOT NULL,            -- 'BTCUSDT'
-  exchange      TEXT NOT NULL,            -- 'binance', 'bybit', 'okx', 'bitget'
-  is_active     BOOLEAN DEFAULT TRUE,
-  created_at    TIMESTAMPTZ DEFAULT NOW(),
-  UNIQUE(symbol, exchange)
-);
-```
+### 4.1 TypeScript Interfaces
 
-### 4.2 `ticker_snapshots`
-Latest ticker data per symbol per exchange, overwritten on each poll.
+```typescript
+// Normalized ticker data returned by API routes
+interface TickerData {
+  symbol: string;          // 'BTCUSDT'
+  base_symbol: string;     // 'BTC'
+  exchange: string;        // 'binance', 'bybit', 'okx', 'bitget'
+  price: number;
+  price_change_5m?: number;
+  price_change_15m?: number;
+  price_change_1h?: number;
+  price_change_4h?: number;
+  price_change_24h?: number;
+  price_change_7d?: number;
+  volume_24h_usd: number;
+  open_interest?: number;
+  funding_rate?: number;
+}
 
-```sql
-CREATE TABLE ticker_snapshots (
-  id              SERIAL PRIMARY KEY,
-  symbol          TEXT NOT NULL,
-  exchange        TEXT NOT NULL,
-  price           NUMERIC NOT NULL,
-  price_change_5m   NUMERIC,
-  price_change_15m  NUMERIC,
-  price_change_1h   NUMERIC,
-  price_change_4h   NUMERIC,
-  price_change_24h  NUMERIC,
-  price_change_7d   NUMERIC,
-  volume_24h_usd  NUMERIC,
-  open_interest   NUMERIC,
-  funding_rate    NUMERIC,
-  updated_at      TIMESTAMPTZ DEFAULT NOW(),
-  UNIQUE(symbol, exchange)
-);
+// S/R level computed on the fly from candle data
+interface SRLevel {
+  price: number;
+  type: 'support' | 'resistance';
+  strength: number;
+  timeframe: string;       // '4h', '1d', '1w'
+}
 
--- Index for fast sorting by change %
-CREATE INDEX idx_ticker_change_1h ON ticker_snapshots (price_change_1h DESC);
-CREATE INDEX idx_ticker_change_24h ON ticker_snapshots (price_change_24h DESC);
-```
-
-### 4.3 `sr_levels`
-Computed support and resistance levels per symbol per higher timeframe.
-
-```sql
-CREATE TABLE sr_levels (
-  id            SERIAL PRIMARY KEY,
-  base_symbol   TEXT NOT NULL,            -- 'BTC'
-  timeframe     TEXT NOT NULL,            -- '4h', '1d', '1w'
-  level_type    TEXT NOT NULL,            -- 'support' or 'resistance'
-  price         NUMERIC NOT NULL,
-  strength      INTEGER DEFAULT 1,       -- # of touches / confluences
-  computed_at   TIMESTAMPTZ DEFAULT NOW(),
-  UNIQUE(base_symbol, timeframe, price)
-);
-
-CREATE INDEX idx_sr_symbol ON sr_levels (base_symbol, timeframe);
-```
-
-### 4.4 `candles_cache`
-Raw candlestick data for S/R calculation (avoids re-fetching).
-
-```sql
-CREATE TABLE candles_cache (
-  id            SERIAL PRIMARY KEY,
-  symbol        TEXT NOT NULL,
-  exchange      TEXT NOT NULL,
-  timeframe     TEXT NOT NULL,           -- '4h', '1d', '1w'
-  open_time     BIGINT NOT NULL,
-  open          NUMERIC NOT NULL,
-  high          NUMERIC NOT NULL,
-  low           NUMERIC NOT NULL,
-  close         NUMERIC NOT NULL,
-  volume        NUMERIC,
-  UNIQUE(symbol, exchange, timeframe, open_time)
-);
+// Candle data fetched from exchange APIs
+interface Candle {
+  open: number;
+  high: number;
+  low: number;
+  close: number;
+  openTime: number;
+}
 ```
 
 ---
@@ -244,31 +177,29 @@ CREATE TABLE candles_cache (
 ### 5.1 Ticker Aggregation
 
 ```
-EVERY 15-30 SECONDS:
+ON EACH API REQUEST (cached via Next.js revalidate ~15-30s):
 
-1. Fetch /ticker/24hr from each exchange in parallel
+1. Fetch /ticker/24hr from each exchange in parallel (Promise.allSettled)
 2. For each symbol:
-   a. Normalize to common format { symbol, price, change_pct, volume, oi, funding }
-   b. Compute short-term change % using cached candle close prices:
-      - 5m change  = (current - close_5m_ago) / close_5m_ago * 100
-      - 15m change = (current - close_15m_ago) / close_15m_ago * 100
+   a. Normalize to common TickerData format
+   b. Use native change % from exchange where available:
       - 1h change  = from ticker or computed
-      - 4h change  = computed from candles
       - 24h change = from ticker (native)
-      - 7d change  = computed from candles
-3. Cross-reference with sr_levels:
-   - For each symbol, check if current price is within THRESHOLD% of any S/R level
+   c. For shorter/longer timeframes, compute from candle close prices
+3. Compute S/R levels on the fly (see 5.2) for top movers
+4. Cross-reference current price with S/R levels:
+   - Check if price is within THRESHOLD% of any level
    - Attach nearest S/R data: { level_price, level_type, timeframe, distance_pct }
-4. Rank: top N gainers + top N losers per timeframe
-5. UPSERT into ticker_snapshots
+5. Rank: top N gainers + top N losers per timeframe
+6. Return JSON response
 ```
 
 ### 5.2 Support/Resistance Detection
 
 ```
-EVERY 5-15 MINUTES (per symbol, per higher timeframe):
+ON DEMAND (computed per API request, cached via Next.js revalidate ~5 min):
 
-Input:  Array of candles (OHLCV) for timeframe [4H, 1D, 1W]
+Input:  Array of candles (OHLCV) for timeframe [4H, 1D, 1W] fetched live
 Output: Array of { price, type: 'support'|'resistance', strength }
 
 Algorithm — Swing High/Low Detection:
@@ -489,46 +420,7 @@ Compression  →  Purple border (#a855f7), ⚡ icon, tooltip with details
 
 ---
 
-## 8. Background Worker Architecture
-
-### 8.1 Ticker Aggregator Worker
-
-```
-Schedule: Every 15-30 seconds (via setInterval in a long-running process, 
-          or Vercel Cron + edge function for serverless)
-
-Flow:
-1. Promise.allSettled([
-     fetchBinanceTickers(),
-     fetchBybitTickers(),
-     // fetchOKXTickers(),   // V2
-     // fetchBitgetTickers(), // V2
-   ])
-2. Normalize all responses to common TickerData shape
-3. Merge by base_symbol (aggregate volume, pick best price, etc.)
-4. Compute short-term change % from candles_cache
-5. Cross-reference with sr_levels table
-6. Batch UPSERT into ticker_snapshots
-7. Log latency + any exchange failures
-```
-
-### 8.2 S/R Calculator Worker
-
-```
-Schedule: Every 5 minutes for 4H, every 15 minutes for 1D/1W
-
-Flow:
-1. Get list of active symbols from symbols table
-2. For each symbol (batched, respecting rate limits):
-   a. Fetch last 100 candles per timeframe from exchange
-   b. Cache in candles_cache table
-   c. Run swing high/low detection
-   d. Cluster nearby levels
-   e. UPSERT into sr_levels
-3. Prune stale levels (older than 30 days for 4H, 90 days for 1D/1W)
-```
-
-### 8.3 Rate Limit Management
+## 8. Rate Limit Management
 
 ```
 Exchange       Limit                  Strategy
@@ -540,10 +432,9 @@ OKX            20 req/2s              Sequential with backoff
 Bitget         20 req/1s              Sequential with backoff
 
 Implementation:
-- Use a token bucket or sliding window per exchange
+- Next.js revalidate ensures we don't hit exchanges on every user request
 - Retry with exponential backoff on 429 responses
-- Circuit breaker: if an exchange fails 3x consecutively, 
-  skip for 60s and serve stale data with a "delayed" badge
+- If an exchange fails, serve partial data with a "unavailable" badge
 ```
 
 ---
@@ -552,13 +443,11 @@ Implementation:
 
 | Layer | Technology | Rationale |
 |---|---|---|
-| Frontend | Next.js 14+ (App Router) | SSR, API routes, your existing stack |
+| Frontend | Next.js 14+ (App Router) | SSR, API routes, caching via revalidate |
 | Styling | TailwindCSS | Rapid UI, easy highlight classes |
 | State/Fetching | TanStack Query (React Query) | Auto-refetch, stale-while-revalidate |
-| Database | Supabase (PostgreSQL) | Managed, real-time subscriptions, your existing stack |
-| Cache (optional) | Upstash Redis | Sub-ms reads for ticker data if needed |
-| Background Jobs | Vercel Cron + Edge Functions | Serverless, or a standalone Node process |
-| S/R Engine | Python (or TypeScript) | Swing detection + clustering logic |
+| Data | No DB — stateless | Live exchange API fetches, cached via Next.js ISR |
+| S/R Engine | TypeScript | Swing detection + clustering, computed on the fly |
 | Monitoring | Vercel Analytics + Sentry | Error tracking, latency monitoring |
 | Deployment | Vercel | Zero-config Next.js deploy |
 | Alerts (V2) | n8n / Make → Telegram | Webhook-based notifications |
@@ -576,22 +465,13 @@ BINANCE_API_SECRET=
 BYBIT_API_KEY=
 BYBIT_API_SECRET=
 
-# Supabase
-NEXT_PUBLIC_SUPABASE_URL=https://xxx.supabase.co
-NEXT_PUBLIC_SUPABASE_ANON_KEY=xxx
-SUPABASE_SERVICE_ROLE_KEY=xxx
-
-# Upstash Redis (optional)
-UPSTASH_REDIS_REST_URL=
-UPSTASH_REDIS_REST_TOKEN=
-
 # Scanner settings
-TICKER_POLL_INTERVAL_MS=15000
-SR_CALC_INTERVAL_MS=300000
 SR_PROXIMITY_THRESHOLD_PCT=1.5
 SR_CLUSTER_PCT=0.5
 TOP_N_RESULTS=20
 ACTIVE_EXCHANGES=binance,bybit
+REVALIDATE_TICKERS_SEC=15
+REVALIDATE_SR_SEC=300
 
 # Feature flags
 ENABLE_OKX=false
@@ -804,27 +684,25 @@ export { findNearbyLevels };
 ### MVP (Week 1-2)
 
 ```
-Phase 1 — Data Layer (Day 1-2):
-  ✦ Set up Supabase tables
+Phase 1 — Exchange Fetchers + S/R Engine (Day 1-3):
   ✦ Build exchange fetcher modules (Binance + Bybit)
-  ✦ Ticker aggregation worker (cron or long-running)
-  ✦ Verify data flows into ticker_snapshots
-
-Phase 2 — S/R Engine (Day 3-4):
+  ✦ Normalize ticker data to common format
   ✦ Candle fetcher for 4H, 1D, 1W
-  ✦ Swing high/low detection
-  ✦ Level clustering
-  ✦ Proximity checking
-  ✦ S/R worker on cron
+  ✦ Swing high/low detection + level clustering
+  ✦ Proximity checking logic
 
-Phase 3 — API + Frontend (Day 5-7):
-  ✦ /api/tickers endpoint with ranking + S/R attachment
+Phase 2 — API Routes (Day 4-5):
+  ✦ /api/tickers endpoint with live fetch + ranking + S/R attachment
+  ✦ /api/sr-levels endpoint with on-the-fly computation
+  ✦ Next.js revalidate caching (15-30s tickers, 5min S/R)
+
+Phase 3 — Frontend (Day 6-8):
   ✦ Next.js table UI with timeframe tabs
   ✦ S/R highlighting (row colors + badges)
   ✦ Coinglass + TradingView link buttons
-  ✦ Auto-refresh via React Query
+  ✦ Auto-refresh via TanStack Query
 
-Phase 4 — Polish + Deploy (Day 8-10):
+Phase 4 — Polish + Deploy (Day 9-10):
   ✦ Error handling, loading states, empty states
   ✦ Mobile responsive layout
   ✦ Deploy to Vercel
@@ -839,8 +717,8 @@ Phase 4 — Polish + Deploy (Day 8-10):
 ✦ Telegram/Discord alerts via n8n for S/R touches on top movers
 ✦ Volume profile-based S/R (in addition to swing detection)
 ✦ Funding rate heatmap view
-✦ Historical performance tracking (did flagged S/R levels hold?)
-✦ User accounts + watchlists (Supabase Auth)
+✦ Historical performance tracking (add DB layer when needed)
+✦ User accounts + watchlists
 ✦ Embeddable widget mode for trading dashboards
 ```
 
@@ -872,10 +750,9 @@ Alerting:
 ```
 • API keys stored in environment variables, never client-side
 • Public exchange endpoints only — no trading or account access
-• Rate limit own API routes to prevent abuse (Vercel built-in or Upstash ratelimit)
+• Rate limit own API routes to prevent abuse (Vercel built-in)
 • No user authentication needed for MVP (read-only public data)
 • CORS configured for own domain only
-• Supabase RLS policies: service role for workers, anon for API reads
 ```
 
 ---
@@ -883,11 +760,9 @@ Alerting:
 ## 16. Cost Estimate (MVP)
 
 ```
-Vercel (Hobby/Pro):     $0-20/mo   (API routes + cron)
-Supabase (Free/Pro):    $0-25/mo   (database + real-time)
-Upstash Redis:          $0-10/mo   (optional cache layer)
+Vercel (Hobby/Pro):     $0-20/mo   (API routes + ISR caching)
 Domain:                 $10-15/yr
 Exchange APIs:          $0          (public endpoints)
 ────────────────────────────────────
-Total MVP:              $0-55/mo
+Total MVP:              $0-20/mo
 ```
