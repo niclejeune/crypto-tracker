@@ -3,9 +3,9 @@ export interface TickerData {
   base_symbol: string;
   exchange: string;
   price: number;
-  price_change_1h?: number;
-  price_change_24h?: number;
+  change_pct: number;
   volume_24h_usd: number;
+  market_cap?: number;
   open_interest?: number;
   funding_rate?: number;
   near_sr: ProximityResult[];

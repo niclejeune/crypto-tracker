@@ -10,11 +10,11 @@ function formatPrice(price: number): string {
   return price.toFixed(6);
 }
 
-function formatVolume(vol: number): string {
-  if (vol >= 1e9) return `${(vol / 1e9).toFixed(1)}B`;
-  if (vol >= 1e6) return `${(vol / 1e6).toFixed(1)}M`;
-  if (vol >= 1e3) return `${(vol / 1e3).toFixed(0)}K`;
-  return vol.toFixed(0);
+function formatCompact(val: number): string {
+  if (val >= 1e9) return `${(val / 1e9).toFixed(1)}B`;
+  if (val >= 1e6) return `${(val / 1e6).toFixed(1)}M`;
+  if (val >= 1e3) return `${(val / 1e3).toFixed(0)}K`;
+  return val.toFixed(0);
 }
 
 function formatFunding(rate?: number): string {
@@ -65,7 +65,8 @@ export function TickerTable({ tickers, side }: TickerTableProps) {
             <th className="px-3 py-2 text-left">Symbol</th>
             <th className="px-3 py-2 text-left">Exchange</th>
             <th className="px-3 py-2 text-right">Price</th>
-            <th className="px-3 py-2 text-right">24h %</th>
+            <th className="px-3 py-2 text-right">Change</th>
+            <th className="px-3 py-2 text-right">Mkt Cap</th>
             <th className="px-3 py-2 text-right">Volume</th>
             <th className="px-3 py-2 text-right">Funding</th>
             <th className="px-3 py-2 text-left">S/R</th>
@@ -80,10 +81,8 @@ export function TickerTable({ tickers, side }: TickerTableProps) {
             >
               <td className="px-3 py-2.5 text-gray-500">{i + 1}</td>
               <td className="px-3 py-2.5 font-medium">
-                <div>
-                  <span className="text-white">{ticker.base_symbol}</span>
-                  <span className="text-gray-500 text-xs ml-1">USDT</span>
-                </div>
+                <span className="text-white">{ticker.base_symbol}</span>
+                <span className="text-gray-500 text-xs ml-1">USDT</span>
               </td>
               <td className="px-3 py-2.5">
                 <span className="text-xs px-1.5 py-0.5 rounded bg-gray-800 text-gray-300 capitalize">
@@ -95,15 +94,17 @@ export function TickerTable({ tickers, side }: TickerTableProps) {
               </td>
               <td
                 className={`px-3 py-2.5 text-right font-mono font-medium ${
-                  side === "gainers" ? "text-emerald-400" : "text-red-400"
+                  ticker.change_pct >= 0 ? "text-emerald-400" : "text-red-400"
                 }`}
               >
-                {ticker.price_change_24h != null
-                  ? `${ticker.price_change_24h > 0 ? "+" : ""}${ticker.price_change_24h.toFixed(2)}%`
-                  : "—"}
+                {ticker.change_pct > 0 ? "+" : ""}
+                {ticker.change_pct.toFixed(2)}%
               </td>
               <td className="px-3 py-2.5 text-right text-gray-300 font-mono">
-                ${formatVolume(ticker.volume_24h_usd)}
+                {ticker.market_cap ? `$${formatCompact(ticker.market_cap)}` : "—"}
+              </td>
+              <td className="px-3 py-2.5 text-right text-gray-300 font-mono">
+                ${formatCompact(ticker.volume_24h_usd)}
               </td>
               <td className="px-3 py-2.5 text-right text-gray-300 font-mono text-xs">
                 {formatFunding(ticker.funding_rate)}
