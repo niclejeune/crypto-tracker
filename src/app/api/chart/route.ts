@@ -33,7 +33,9 @@ async function fetchCandlesWithFallback(
   // Try Binance first
   try {
     const candles = await fetchBinanceCandles(symbol, binanceInterval, limit);
-    if (candles.length >= 2) return candles;
+    // Check candles have actual price movement (Binance returns stale zero-volume candles for suspended symbols)
+    const hasVolume = candles.some((c) => c.open !== c.close || c.high !== c.low);
+    if (candles.length >= 2 && hasVolume) return candles;
   } catch {
     // Binance failed, try Bybit
   }
