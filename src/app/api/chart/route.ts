@@ -1,8 +1,19 @@
 import { NextResponse } from "next/server";
 import type { NextRequest } from "next/server";
 import { fetchBinanceCandles } from "@/lib/exchanges/binance";
+import { fetchBybitCandles } from "@/lib/exchanges/bybit";
+import type { Candle } from "@/lib/types";
 
 export const revalidate = 60;
+
+// Binance interval → Bybit interval mapping
+const BYBIT_INTERVAL_MAP: Record<string, string> = {
+  "1m": "1",
+  "5m": "5",
+  "15m": "15",
+  "1h": "60",
+  "4h": "240",
+};
 
 // Number of candles per timeframe to show a meaningful spaghetti chart
 const TF_CANDLE_COUNT: Record<string, { interval: string; limit: number }> = {
@@ -13,6 +24,32 @@ const TF_CANDLE_COUNT: Record<string, { interval: string; limit: number }> = {
   "1d": { interval: "1h", limit: 24 },
   "1w": { interval: "4h", limit: 42 },
 };
+
+async function fetchCandlesWithFallback(
+  symbol: string,
+  binanceInterval: string,
+  limit: number
+): Promise<Candle[]> {
+  // Try Binance first
+  try {
+    const candles = await fetchBinanceCandles(symbol, binanceInterval, limit);
+    if (candles.length >= 2) return candles;
+  } catch {
+    // Binance failed, try Bybit
+  }
+
+  // Fallback to Bybit
+  const bybitInterval = BYBIT_INTERVAL_MAP[binanceInterval];
+  if (!bybitInterval) return [];
+
+  try {
+    const candles = await fetchBybitCandles(symbol, bybitInterval, limit);
+    // Bybit returns descending order, reverse to ascending
+    return candles.reverse();
+  } catch {
+    return [];
+  }
+}
 
 export async function GET(request: NextRequest) {
   const symbols = request.nextUrl.searchParams.get("symbols");
@@ -31,7 +68,7 @@ export async function GET(request: NextRequest) {
 
   const results = await Promise.allSettled(
     symbolList.map(async (symbol) => {
-      const candles = await fetchBinanceCandles(
+      const candles = await fetchCandlesWithFallback(
         symbol,
         config.interval,
         config.limit + 1 // +1 to get the reference candle
@@ -51,7 +88,8 @@ export async function GET(request: NextRequest) {
 
   const series = results
     .filter((r) => r.status === "fulfilled")
-    .map((r) => (r as PromiseFulfilledResult<{ symbol: string; points: { time: number; pct: number }[] }>).value);
+    .map((r) => (r as PromiseFulfilledResult<{ symbol: string; points: { time: number; pct: number }[] }>).value)
+    .filter((s) => s.points.length > 0); // Exclude symbols with no data
 
   return NextResponse.json({ timeframe: tf, series });
 }

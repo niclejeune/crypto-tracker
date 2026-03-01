@@ -113,6 +113,10 @@ export function SpaghettiChart({ gainers, losers, timeframe }: SpaghettiChartPro
     enabled: symbols.length > 0,
   });
 
+  // Filter symbolMetas to only those with actual chart data
+  const activeSymbols = new Set(data?.series.map((s) => s.symbol) ?? []);
+  const activeSymbolMetas = symbolMetas.filter((m) => activeSymbols.has(m.symbol));
+
   if (isLoading || !data || data.series.length === 0) {
     return (
       <Card className="bg-gray-900 border-gray-800">
@@ -139,7 +143,7 @@ export function SpaghettiChart({ gainers, losers, timeframe }: SpaghettiChartPro
       label: formatTime(time, timeframe),
     };
     for (const s of data.series) {
-      const meta = symbolMetas.find((m) => m.symbol === s.symbol);
+      const meta = activeSymbolMetas.find((m) => m.symbol === s.symbol);
       const key = meta?.base ?? s.symbol;
       const point = s.points.find((p) => p.time === time);
       if (point) row[key] = Math.round(point.pct * 100) / 100;
@@ -154,7 +158,7 @@ export function SpaghettiChart({ gainers, losers, timeframe }: SpaghettiChartPro
           Top Movers — % Change ({timeframe.toUpperCase()})
         </CardTitle>
         <div className="flex flex-wrap gap-x-4 gap-y-1 mt-2">
-          {symbolMetas.map((m) => {
+          {activeSymbolMetas.map((m) => {
             const series = data.series.find((s) => s.symbol === m.symbol);
             const lastPct = series?.points[series.points.length - 1]?.pct ?? 0;
             return (
@@ -192,7 +196,7 @@ export function SpaghettiChart({ gainers, losers, timeframe }: SpaghettiChartPro
             />
             <ReferenceLine y={0} stroke="#4b5563" strokeWidth={1.5} />
             <Tooltip content={<CustomTooltip />} />
-            {symbolMetas.map((m) => (
+            {activeSymbolMetas.map((m) => (
               <Line
                 key={m.symbol}
                 type="monotone"
