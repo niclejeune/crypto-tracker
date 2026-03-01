@@ -24,3 +24,10 @@ CLAUDE.md
 
 # Vercel
 .vercel/
+
+# Build
+.next/
+next-env.d.ts
+
+# Bun
+bun.lock
