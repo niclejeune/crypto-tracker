@@ -5,6 +5,7 @@ import { useQuery } from "@tanstack/react-query";
 import type { TickerResponse } from "@/lib/types";
 import { TickerTable } from "@/components/ticker-table";
 import { TimeframeTabs } from "@/components/timeframe-tabs";
+import { SpaghettiChart } from "@/components/spaghetti-chart";
 
 const TIMEFRAMES = ["5m", "15m", "1h", "4h", "1d", "1w"] as const;
 
@@ -53,6 +54,12 @@ export default function Home() {
 
       {data && (
         <div className="space-y-8">
+          <SpaghettiChart
+            gainers={data.gainers}
+            losers={data.losers}
+            timeframe={tf}
+          />
+
           <section>
             <h2 className="text-lg font-semibold text-emerald-400 mb-3">
               Top Gainers ({tf.toUpperCase()})
