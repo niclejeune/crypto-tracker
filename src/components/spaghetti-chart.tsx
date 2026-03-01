@@ -8,18 +8,19 @@ import {
   CardTitle,
 } from "@/components/ui/card";
 import {
-  ChartContainer,
-  ChartTooltip,
-  ChartTooltipContent,
-} from "@/components/ui/chart";
-import { LineChart, Line, XAxis, YAxis, ReferenceLine, CartesianGrid } from "recharts";
+  LineChart,
+  Line,
+  XAxis,
+  YAxis,
+  ReferenceLine,
+  CartesianGrid,
+  Tooltip,
+  ResponsiveContainer,
+} from "recharts";
 import type { TickerData } from "@/lib/types";
 
-// Distinct colors for up to 10 lines
-const LINE_COLORS = [
-  "#22c55e", "#3b82f6", "#f59e0b", "#ef4444", "#a855f7",
-  "#06b6d4", "#f97316", "#ec4899", "#84cc16", "#6366f1",
-];
+const GAINER_COLORS = ["#22c55e", "#4ade80", "#86efac", "#a3e635", "#34d399"];
+const LOSER_COLORS = ["#ef4444", "#f87171", "#fca5a5", "#fb923c", "#f472b6"];
 
 interface SpaghettiChartProps {
   gainers: TickerData[];
@@ -40,22 +41,74 @@ interface ChartResponse {
 function formatTime(timestamp: number, tf: string): string {
   const d = new Date(timestamp);
   if (tf === "1w") return d.toLocaleDateString("en-US", { month: "short", day: "numeric" });
-  if (tf === "1d") return d.toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit" });
   return d.toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit" });
+}
+
+interface SymbolMeta {
+  symbol: string;
+  base: string;
+  color: string;
+  side: "gainer" | "loser";
+}
+
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function CustomTooltip({ active, payload, label }: any) {
+  if (!active || !payload?.length) return null;
+
+  // Sort by value descending
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const sorted = [...payload].sort((a: any, b: any) => (b.value ?? 0) - (a.value ?? 0));
+
+  return (
+    <div className="bg-gray-900/95 border border-gray-700 rounded-lg px-3 py-2 text-xs shadow-xl">
+      <div className="text-gray-400 mb-1.5 font-medium">{label}</div>
+      {/* eslint-disable-next-line @typescript-eslint/no-explicit-any */}
+      {sorted.map((entry: any) => {
+        const val = entry.value as number;
+        return (
+          <div key={entry.dataKey} className="flex items-center justify-between gap-4 py-0.5">
+            <div className="flex items-center gap-1.5">
+              <span
+                className="w-2 h-2 rounded-full shrink-0"
+                style={{ backgroundColor: entry.color }}
+              />
+              <span className="text-gray-300">{entry.name}</span>
+            </div>
+            <span className={val >= 0 ? "text-emerald-400 font-mono" : "text-red-400 font-mono"}>
+              {val > 0 ? "+" : ""}{val.toFixed(1)}%
+            </span>
+          </div>
+        );
+      })}
+    </div>
+  );
 }
 
 export function SpaghettiChart({ gainers, losers, timeframe }: SpaghettiChartProps) {
   const topGainers = gainers.slice(0, 5);
   const topLosers = losers.slice(0, 5);
-  const topMovers = [...topGainers, ...topLosers];
-  const symbols = topMovers.map((t) => t.symbol).join(",");
+
+  const symbolMetas: SymbolMeta[] = [
+    ...topGainers.map((t, i) => ({
+      symbol: t.symbol,
+      base: t.base_symbol,
+      color: GAINER_COLORS[i]!,
+      side: "gainer" as const,
+    })),
+    ...topLosers.map((t, i) => ({
+      symbol: t.symbol,
+      base: t.base_symbol,
+      color: LOSER_COLORS[i]!,
+      side: "loser" as const,
+    })),
+  ];
+
+  const symbols = symbolMetas.map((m) => m.symbol).join(",");
 
   const { data, isLoading } = useQuery<ChartResponse>({
     queryKey: ["chart", symbols, timeframe],
     queryFn: () =>
-      fetch(`/api/chart?symbols=${symbols}&tf=${timeframe}`).then((r) =>
-        r.json()
-      ),
+      fetch(`/api/chart?symbols=${symbols}&tf=${timeframe}`).then((r) => r.json()),
     refetchInterval: 60_000,
     enabled: symbols.length > 0,
   });
@@ -64,16 +117,16 @@ export function SpaghettiChart({ gainers, losers, timeframe }: SpaghettiChartPro
     return (
       <Card className="bg-gray-900 border-gray-800">
         <CardHeader className="pb-2">
-          <CardTitle className="text-sm text-gray-400">Top Movers — % Change Over Time</CardTitle>
+          <CardTitle className="text-sm text-gray-400">Top Movers</CardTitle>
         </CardHeader>
         <CardContent className="h-64 flex items-center justify-center text-gray-600 text-sm">
-          {isLoading ? "Loading chart data..." : "No chart data"}
+          {isLoading ? "Loading chart..." : "No chart data"}
         </CardContent>
       </Card>
     );
   }
 
-  // Build unified data points: each row = one timestamp with all symbols' pct values
+  // Build unified data points
   const allTimes = new Set<number>();
   for (const s of data.series) {
     for (const p of s.points) allTimes.add(p.time);
@@ -81,22 +134,17 @@ export function SpaghettiChart({ gainers, losers, timeframe }: SpaghettiChartPro
   const sortedTimes = Array.from(allTimes).sort((a, b) => a - b);
 
   const chartData = sortedTimes.map((time) => {
-    const row: Record<string, number | string> = { time, label: formatTime(time, timeframe) };
+    const row: Record<string, number | string> = {
+      time,
+      label: formatTime(time, timeframe),
+    };
     for (const s of data.series) {
+      const meta = symbolMetas.find((m) => m.symbol === s.symbol);
+      const key = meta?.base ?? s.symbol;
       const point = s.points.find((p) => p.time === time);
-      if (point) row[s.symbol] = Math.round(point.pct * 100) / 100;
+      if (point) row[key] = Math.round(point.pct * 100) / 100;
     }
     return row;
-  });
-
-  // Build chart config for shadcn
-  const chartConfig: Record<string, { label: string; color: string }> = {};
-  data.series.forEach((s, i) => {
-    const base = s.symbol.replace("USDT", "");
-    chartConfig[s.symbol] = {
-      label: base,
-      color: LINE_COLORS[i % LINE_COLORS.length]!,
-    };
   });
 
   return (
@@ -105,64 +153,59 @@ export function SpaghettiChart({ gainers, losers, timeframe }: SpaghettiChartPro
         <CardTitle className="text-sm text-gray-400">
           Top Movers — % Change ({timeframe.toUpperCase()})
         </CardTitle>
-      </CardHeader>
-      <CardContent>
-        <ChartContainer config={chartConfig} className="h-72 w-full">
-          <LineChart data={chartData}>
-            <CartesianGrid strokeDasharray="3 3" stroke="#374151" />
-            <XAxis
-              dataKey="label"
-              tick={{ fontSize: 10, fill: "#9ca3af" }}
-              tickLine={false}
-              axisLine={false}
-              interval="preserveStartEnd"
-            />
-            <YAxis
-              tick={{ fontSize: 10, fill: "#9ca3af" }}
-              tickLine={false}
-              axisLine={false}
-              tickFormatter={(v: number) => `${v > 0 ? "+" : ""}${v}%`}
-              width={50}
-            />
-            <ReferenceLine y={0} stroke="#6b7280" strokeDasharray="3 3" />
-            <ChartTooltip
-              content={
-                <ChartTooltipContent
-                  formatter={(value) => `${Number(value) > 0 ? "+" : ""}${value}%`}
-                />
-              }
-            />
-            {data.series.map((s, i) => (
-              <Line
-                key={s.symbol}
-                type="monotone"
-                dataKey={s.symbol}
-                stroke={LINE_COLORS[i % LINE_COLORS.length]}
-                strokeWidth={2}
-                dot={false}
-                connectNulls
-              />
-            ))}
-          </LineChart>
-        </ChartContainer>
-        <div className="flex flex-wrap gap-3 mt-3 px-2">
-          {data.series.map((s, i) => {
-            const ticker = topMovers.find((t) => t.symbol === s.symbol);
-            const lastPct = s.points[s.points.length - 1]?.pct ?? 0;
+        <div className="flex flex-wrap gap-x-4 gap-y-1 mt-2">
+          {symbolMetas.map((m) => {
+            const series = data.series.find((s) => s.symbol === m.symbol);
+            const lastPct = series?.points[series.points.length - 1]?.pct ?? 0;
             return (
-              <div key={s.symbol} className="flex items-center gap-1.5 text-xs">
+              <div key={m.symbol} className="flex items-center gap-1.5 text-xs">
                 <span
-                  className="w-2.5 h-2.5 rounded-full"
-                  style={{ backgroundColor: LINE_COLORS[i % LINE_COLORS.length] }}
+                  className="w-2.5 h-0.5 rounded-full"
+                  style={{ backgroundColor: m.color }}
                 />
-                <span className="text-gray-300">{ticker?.base_symbol ?? s.symbol.replace("USDT", "")}</span>
-                <span className={lastPct >= 0 ? "text-emerald-400" : "text-red-400"}>
+                <span className="text-gray-400">{m.base}</span>
+                <span className={lastPct >= 0 ? "text-emerald-400 font-mono" : "text-red-400 font-mono"}>
                   {lastPct > 0 ? "+" : ""}{lastPct.toFixed(1)}%
                 </span>
               </div>
             );
           })}
         </div>
+      </CardHeader>
+      <CardContent className="pt-0">
+        <ResponsiveContainer width="100%" height={300}>
+          <LineChart data={chartData} margin={{ top: 8, right: 12, bottom: 0, left: 0 }}>
+            <CartesianGrid strokeDasharray="3 3" stroke="#1f2937" />
+            <XAxis
+              dataKey="label"
+              tick={{ fontSize: 10, fill: "#6b7280" }}
+              tickLine={false}
+              axisLine={false}
+              interval="preserveStartEnd"
+            />
+            <YAxis
+              tick={{ fontSize: 10, fill: "#6b7280" }}
+              tickLine={false}
+              axisLine={false}
+              tickFormatter={(v: number) => `${v > 0 ? "+" : ""}${v}%`}
+              width={48}
+            />
+            <ReferenceLine y={0} stroke="#4b5563" strokeWidth={1.5} />
+            <Tooltip content={<CustomTooltip />} />
+            {symbolMetas.map((m) => (
+              <Line
+                key={m.symbol}
+                type="monotone"
+                dataKey={m.base}
+                name={m.base}
+                stroke={m.color}
+                strokeWidth={1.5}
+                dot={false}
+                connectNulls
+              />
+            ))}
+          </LineChart>
+        </ResponsiveContainer>
       </CardContent>
     </Card>
   );
