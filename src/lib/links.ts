@@ -1,8 +1,7 @@
+// Only exchanges that TradingView actually supports for perp charts
 const EXCHANGE_TV_MAP: Record<string, string> = {
-  binance: "BINANCE",
   bybit: "BYBIT",
-  okx: "OKX",
-  bitget: "BITGET",
+  mexc: "MEXC",
 };
 
 export function getCoinglassHeatmapUrl(baseSymbol: string): string {
@@ -19,8 +18,9 @@ export function getCoinglassOIUrl(baseSymbol: string): string {
 
 export function getTradingViewUrl(
   symbol: string,
-  exchange: string = "binance"
+  exchange: string = "bybit"
 ): string {
-  const tvExchange = EXCHANGE_TV_MAP[exchange] || "BINANCE";
+  // HyperLiquid and Bitunix don't exist on TradingView — always fall back to BYBIT
+  const tvExchange = EXCHANGE_TV_MAP[exchange] || "BYBIT";
   return `https://www.tradingview.com/chart/?symbol=${tvExchange}:${symbol}.P`;
 }

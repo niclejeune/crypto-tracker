@@ -6,6 +6,7 @@ import type { TickerResponse } from "@/lib/types";
 import { TickerTable } from "@/components/ticker-table";
 import { TimeframeTabs } from "@/components/timeframe-tabs";
 import { SpaghettiChart } from "@/components/spaghetti-chart";
+import { SignalCards } from "@/components/signal-cards";
 
 const TIMEFRAMES = ["5m", "15m", "1h", "4h", "1d", "1w"] as const;
 
@@ -51,6 +52,8 @@ export default function Home() {
           Failed to load data. Retrying...
         </div>
       )}
+
+      <SignalCards />
 
       {data && (
         <div className="space-y-8">

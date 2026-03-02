@@ -46,6 +46,7 @@ interface BybitKlineItem {
   2: string; // high
   3: string; // low
   4: string; // close
+  5: string; // turnover (USD volume)
 }
 
 export async function fetchBybitCandles(
@@ -61,11 +62,13 @@ export async function fetchBybitCandles(
 
   const data: BybitResponse<BybitKlineItem> = await res.json();
 
+  // Bybit returns descending order, reverse to ascending
   return data.result.list.map((k) => ({
     openTime: parseInt(k[0]),
     open: parseFloat(k[1]),
     high: parseFloat(k[2]),
     low: parseFloat(k[3]),
     close: parseFloat(k[4]),
-  }));
+    volume: k[5] ? parseFloat(k[5]) : undefined,
+  })).reverse();
 }
