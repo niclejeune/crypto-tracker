@@ -77,7 +77,6 @@ async function fetchAlphaVantage(
     if (!res.ok) return result;
 
     const data: AVResponse = await res.json();
-
     // Rate limit check — AV returns 200 with an Information field when quota exceeded
     if (data.Information || !data.feed) return result;
 
