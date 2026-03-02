@@ -3,6 +3,7 @@ import { fetchAllTickers } from "@/lib/aggregator";
 import { detectSignals } from "@/lib/signals";
 import type { SignalResponse } from "@/lib/types";
 
+export const dynamic = "force-dynamic";
 export const revalidate = 30;
 
 export async function GET() {
