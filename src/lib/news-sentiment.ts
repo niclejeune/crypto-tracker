@@ -10,7 +10,7 @@ interface CacheEntry {
 }
 
 const sentimentCache = new Map<string, CacheEntry>();
-const CACHE_TTL_MS = 10 * 60 * 1000; // 10 min
+const CACHE_TTL_MS = 30 * 60 * 1000; // 30 min (conservative for 25 req/day limit)
 
 function getCached(symbol: string): NewsSentiment | null {
   const entry = sentimentCache.get(symbol);
@@ -24,7 +24,6 @@ function getCached(symbol: string): NewsSentiment | null {
 
 function setCache(symbol: string, data: NewsSentiment): void {
   sentimentCache.set(symbol, { data, timestamp: Date.now() });
-  // Prune old entries
   if (sentimentCache.size > 200) {
     const now = Date.now();
     for (const [key, entry] of sentimentCache) {
@@ -46,57 +45,6 @@ function scoreToLabel(score: number): NewsSentiment["label"] {
 }
 
 // =============================================================================
-// CryptoPanic fetcher
-// =============================================================================
-
-interface CryptoPanicVotes {
-  positive: number;
-  negative: number;
-  important: number;
-  liked: number;
-  disliked: number;
-}
-
-interface CryptoPanicPost {
-  votes: CryptoPanicVotes;
-}
-
-interface CryptoPanicResponse {
-  results?: CryptoPanicPost[];
-}
-
-async function fetchCryptoPanic(
-  symbol: string,
-  apiKey: string
-): Promise<{ score: number; articles: number } | null> {
-  try {
-    const url = `https://cryptopanic.com/api/v1/posts/?auth_token=${apiKey}&currencies=${symbol}&filter=hot&public=true`;
-    const res = await fetch(url, { next: { revalidate: 600 } });
-    if (!res.ok) return null;
-
-    const data: CryptoPanicResponse = await res.json();
-    const posts = data.results;
-    if (!posts || posts.length === 0) return null;
-
-    let totalPositive = 0;
-    let totalNegative = 0;
-
-    for (const post of posts) {
-      totalPositive += post.votes.positive + post.votes.liked;
-      totalNegative += post.votes.negative + post.votes.disliked;
-    }
-
-    const total = totalPositive + totalNegative;
-    if (total === 0) return { score: 0, articles: posts.length };
-
-    const score = (totalPositive - totalNegative) / total;
-    return { score: Math.max(-1, Math.min(1, score)), articles: posts.length };
-  } catch {
-    return null;
-  }
-}
-
-// =============================================================================
 // Alpha Vantage fetcher
 // =============================================================================
 
@@ -112,6 +60,7 @@ interface AVFeedItem {
 
 interface AVResponse {
   feed?: AVFeedItem[];
+  Information?: string;
 }
 
 async function fetchAlphaVantage(
@@ -128,9 +77,10 @@ async function fetchAlphaVantage(
     if (!res.ok) return result;
 
     const data: AVResponse = await res.json();
-    if (!data.feed) return result;
 
-    // Accumulate weighted scores per symbol
+    // Rate limit check — AV returns 200 with an Information field when quota exceeded
+    if (data.Information || !data.feed) return result;
+
     const accum = new Map<
       string,
       { weightedSum: number; totalWeight: number; count: number }
@@ -139,7 +89,6 @@ async function fetchAlphaVantage(
     for (const item of data.feed) {
       if (!item.ticker_sentiment) continue;
       for (const ts of item.ticker_sentiment) {
-        // Match CRYPTO:BTC format
         const match = ts.ticker.match(/^CRYPTO:(\w+)$/);
         if (!match) continue;
         const sym = match[1]!;
@@ -170,14 +119,14 @@ async function fetchAlphaVantage(
       });
     }
   } catch {
-    // fail silently — Alpha Vantage is optional
+    // fail silently
   }
 
   return result;
 }
 
 // =============================================================================
-// Main: fetch + merge
+// Main entry point
 // =============================================================================
 
 export async function fetchNewsSentiment(
@@ -186,7 +135,6 @@ export async function fetchNewsSentiment(
   const result = new Map<string, NewsSentiment>();
   if (symbols.length === 0) return result;
 
-  // Check cache first, collect uncached symbols
   const uncachedSymbols: string[] = [];
   for (const sym of symbols) {
     const cached = getCached(sym);
@@ -199,74 +147,20 @@ export async function fetchNewsSentiment(
 
   if (uncachedSymbols.length === 0) return result;
 
-  const cpKey = process.env.CRYPTOPANIC_API_KEY;
   const avKey = process.env.ALPHAVANTAGE_API_KEY;
+  if (!avKey) return result;
 
-  if (!cpKey && !avKey) return result;
+  const avMap = await fetchAlphaVantage(uncachedSymbols, avKey);
 
-  // Fetch from both APIs in parallel
-  const [cpResults, avResults] = await Promise.allSettled([
-    // CryptoPanic: one request per symbol
-    cpKey
-      ? Promise.allSettled(
-          uncachedSymbols.map(async (sym) => ({
-            symbol: sym,
-            data: await fetchCryptoPanic(sym, cpKey),
-          }))
-        )
-      : Promise.resolve([]),
-
-    // Alpha Vantage: single batch request
-    avKey
-      ? fetchAlphaVantage(uncachedSymbols, avKey)
-      : Promise.resolve(new Map<string, { score: number; articles: number }>()),
-  ]);
-
-  // Collect CryptoPanic results
-  const cpMap = new Map<string, { score: number; articles: number }>();
-  if (cpResults.status === "fulfilled" && Array.isArray(cpResults.value)) {
-    for (const entry of cpResults.value) {
-      if (entry.status === "fulfilled" && entry.value.data) {
-        cpMap.set(entry.value.symbol, entry.value.data);
-      }
-    }
-  }
-
-  // Collect Alpha Vantage results
-  const avMap =
-    avResults.status === "fulfilled" ? avResults.value : new Map();
-
-  // Merge per symbol
   for (const sym of uncachedSymbols) {
-    const cp = cpMap.get(sym);
-    const av = (avMap as Map<string, { score: number; articles: number }>).get(sym);
-
-    if (!cp && !av) continue;
-
-    let score: number;
-    let articles = 0;
-    const sources: string[] = [];
-
-    if (cp && av) {
-      // Weighted average: 0.4 CryptoPanic + 0.6 Alpha Vantage (NLP is higher quality)
-      score = 0.4 * cp.score + 0.6 * av.score;
-      articles = cp.articles + av.articles;
-      sources.push("cryptopanic", "alphavantage");
-    } else if (cp) {
-      score = cp.score;
-      articles = cp.articles;
-      sources.push("cryptopanic");
-    } else {
-      score = av!.score;
-      articles = av!.articles;
-      sources.push("alphavantage");
-    }
+    const av = avMap.get(sym);
+    if (!av) continue;
 
     const sentiment: NewsSentiment = {
-      score: Math.round(score * 100) / 100,
-      label: scoreToLabel(score),
-      articles,
-      sources,
+      score: Math.round(av.score * 100) / 100,
+      label: scoreToLabel(av.score),
+      articles: av.articles,
+      sources: ["alphavantage"],
     };
 
     setCache(sym, sentiment);

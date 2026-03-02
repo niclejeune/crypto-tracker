@@ -45,7 +45,7 @@ export interface NewsSentiment {
   score: number; // -1 (max bearish) to +1 (max bullish)
   label: "Bearish" | "Somewhat Bearish" | "Neutral" | "Somewhat Bullish" | "Bullish";
   articles: number;
-  sources: string[]; // "cryptopanic" | "alphavantage"
+  sources: string[]; // "alphavantage"
 }
 
 export type SignalDirection = "long" | "short";
