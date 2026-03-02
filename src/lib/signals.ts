@@ -935,9 +935,9 @@ export async function detectSignals(
       const liqTier = getLiquidityTier(ticker.volume_24h_usd);
 
       const [candles15m, candles4h, candles1d] = await Promise.all([
-        fetchCandlesForTicker(ticker.symbol, "15", 50, ticker.exchange).catch(() => [] as Candle[]),
-        fetchCandlesForTicker(ticker.symbol, "240", 30, ticker.exchange).catch(() => [] as Candle[]),
-        fetchCandlesForTicker(ticker.symbol, "D", 100, ticker.exchange).catch(() => [] as Candle[]),
+        fetchCandlesForTicker(ticker.symbol, "15m", 50, ticker.exchange).catch(() => [] as Candle[]),
+        fetchCandlesForTicker(ticker.symbol, "4h", 30, ticker.exchange).catch(() => [] as Candle[]),
+        fetchCandlesForTicker(ticker.symbol, "1d", 100, ticker.exchange).catch(() => [] as Candle[]),
       ]);
 
       const srLevels = candles1d.length >= 5 ? computeSRLevels(candles1d, "1d") : [];
